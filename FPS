@@ -1,0 +1,278 @@
+using System;
+using UnityEngine;
+using UnityStandardAssets.CrossPlatformInput;
+using UnityStandardAssets.Utility;
+using Random = UnityEngine.Random;
+using UnityEngine.UI;
+
+#pragma warning disable 618, 649
+namespace UnityStandardAssets.Characters.FirstPerson
+{
+    [RequireComponent(typeof(CharacterController))]
+    [RequireComponent(typeof(AudioSource))]
+    public class FirstPersonController : MonoBehaviour
+    {//bu parametreler karakterin hareketi, ses efektleri ve görünümü üzerinde kontrol sağlamak için kullanılır
+        [SerializeField] private bool m_IsWalking;
+        [SerializeField] private float m_WalkSpeed;
+        [SerializeField] private float m_RunSpeed;
+        [SerializeField] [Range(0f, 1f)] private float m_RunstepLenghten;//Koşarken adım uzunluğunu belirler
+        [SerializeField] private float m_JumpSpeed;
+        [SerializeField] private float m_StickToGroundForce;
+        [SerializeField] private float m_GravityMultiplier;
+        [SerializeField] private MouseLook m_MouseLook;
+        [SerializeField] private bool m_UseFovKick;
+        [SerializeField] private FOVKick m_FovKick = new FOVKick();
+        [SerializeField] private bool m_UseHeadBob;
+        [SerializeField] private CurveControlledBob m_HeadBob = new CurveControlledBob();
+        [SerializeField] private LerpControlledBob m_JumpBob = new LerpControlledBob();
+        [SerializeField] private float m_StepInterval;
+        [SerializeField] private AudioClip[] m_FootstepSounds;    
+        [SerializeField] private AudioClip m_JumpSound;           
+        [SerializeField] private AudioClip m_LandSound;          
+
+        private Camera m_Camera;
+        private bool m_Jump;
+        private float m_YRotation;
+        private Vector2 m_Input;
+        private Vector3 m_MoveDir = Vector3.zero;
+        private CharacterController m_CharacterController;
+        private CollisionFlags m_CollisionFlags;
+        private bool m_PreviouslyGrounded;
+        private Vector3 m_OriginalCameraPosition;
+        private float m_StepCycle;
+        private float m_NextStep;
+        private bool m_Jumping;
+        private AudioSource m_AudioSource;
+        public int puan;
+        public int objeSayisi;
+        public Text puanText;
+        public Text oyunBittiText;
+
+        
+        private void Start()
+        {
+            m_CharacterController = GetComponent<CharacterController>(); // Bu scriptin bağlı olduğu GameObject üzerindeki CharacterController bileşenine erişim sağlanır.
+            m_Camera = Camera.main; // Camera.main sahnede etkin olan ana kamera nesnesine erişim sağlar.
+            m_OriginalCameraPosition = m_Camera.transform.localPosition;   // Kamera pozisyonunun başlangıç değerini saklar.
+            m_FovKick.Setup(m_Camera);
+            m_HeadBob.Setup(m_Camera, m_StepInterval);
+            m_StepCycle = 0f;
+            m_NextStep = m_StepCycle / 2f; // Ayak seslerinin atılma zamanlaması için kullanılan değişkenler başlangıç değerlerine ayarlanır.
+            m_Jumping = false;
+            m_AudioSource = GetComponent<AudioSource>();
+            m_MouseLook.Init(transform, m_Camera.transform);
+        }
+
+
+        // Update is called once per frame
+        private void Update()
+        {
+            RotateView(); //kamera açısını belirleyen fonk
+
+            if (!m_Jump)
+            {
+                m_Jump = CrossPlatformInputManager.GetButtonDown("Jump");  //Eğer karakter henüz zıplama düğmesine basılmamışsa
+                                                                           //(m_Jump false ise), kullanıcı zıplama düğmesine basıp basmadığını kontrol eder ve atar
+            }
+
+            if (!m_PreviouslyGrounded && m_CharacterController.isGrounded)  //Önceki karede karakter yerde değilse ve mevcut karede karakter yerdeyse, bu durumda yapılacak işlemler gerçekleşir
+            {
+                StartCoroutine(m_JumpBob.DoBobCycle()); //Zıplama esnasında karakterin tepki vermesini sağlayan bir bob hareketi başlatılır.
+                PlayLandingSound(); //Zıplama sonrası karakterin yere indiğinde çalacak olan ses efekti çalınır.
+                m_MoveDir.y = 0f; //Karakterin yatay eksendeki (yukarı-aşağı) hareketini sıfırlar, yani karakter dümdüz iner.
+                m_Jumping = false; //Karakter zıplamayı bitirmiş olduğu için zıplama durumu false olarak işaretlenir.
+            }
+            if (!m_CharacterController.isGrounded && !m_Jumping && m_PreviouslyGrounded)
+            {
+                m_MoveDir.y = 0f; // Eğer karakter yerde değilse, zıplama durumu kapalıysa ve önceki karede karakter yerdeyse,
+                                  // karakterin yatay eksendeki hareketini sıfırlar. Bu durumda karakter havada ve zıplama durumu kapalı olduğu için yatay yönde (yukarı-aşağı) hareket etmemesi beklenir.
+            }
+
+            m_PreviouslyGrounded = m_CharacterController.isGrounded; //Karakterin bir önceki karede yerde olup olmadığını takip eden bir değişkeni günceller.
+                                                                     //Bu, karakterin yerde olup olmadığını tutar. Bu güncelleme, sonraki karelerde yerde olup olmadığını anlamak için kullanılır.
+        }
+
+
+        private void PlayLandingSound() //karakterin yere indiğinde çalınacak olan ses efektini yöneten bir metod
+        {
+            m_AudioSource.clip = m_LandSound; // karakterin yere indiğinde çalınacak olan sesin kaynağını belirler
+            m_AudioSource.Play(); //Bu adımda karakterin yere indiği anı simüle eden ses efekti çalınmış olur.
+            m_NextStep = m_StepCycle + .5f; // bir sonraki adım sesinin ne zaman çalınacağını belirler,0.5sn
+        }
+
+
+        private void FixedUpdate()
+        {
+            float speed;
+            GetInput(out speed);//kullanıcı girişine göre hız
+            
+            Vector3 desiredMove = transform.forward * m_Input.y + transform.right * m_Input.x; // Kullanıcının girişine göre karakterin istenen hareket vektörünü oluştur
+
+            RaycastHit hitInfo;
+            Physics.SphereCast(transform.position, m_CharacterController.radius, Vector3.down, out hitInfo,
+                               m_CharacterController.height / 2f, Physics.AllLayers, QueryTriggerInteraction.Ignore);// Karakterin yere temas ettiği noktayı bulmak için SphereCast kullanılır
+            desiredMove = Vector3.ProjectOnPlane(desiredMove, hitInfo.normal).normalized;
+
+            m_MoveDir.x = desiredMove.x * speed; // Hareket vektörüne hızı uygula
+            m_MoveDir.z = desiredMove.z * speed;
+
+
+            if (m_CharacterController.isGrounded)
+            {
+                m_MoveDir.y = -m_StickToGroundForce; // Yerden ayrılma kuvvetini uygula
+
+                if (m_Jump)
+                {
+                    m_MoveDir.y = m_JumpSpeed; // Zıplama hızını uygula, zıplama sesini çal ve zıplama durumunu güncelle
+                    m_MoveDir.y = m_JumpSpeed;
+                    PlayJumpSound();
+                    m_Jump = false;
+                    m_Jumping = true;
+                }
+            }
+            else
+            {
+                m_MoveDir += Physics.gravity * m_GravityMultiplier * Time.fixedDeltaTime; // Karakter yerde değilse, yerçekimi kuvvetini uygula
+            }
+            m_CollisionFlags = m_CharacterController.Move(m_MoveDir * Time.fixedDeltaTime);
+
+            ProgressStepCycle(speed);// Adım sayısını ve kamara pozisyonunu güncelle
+            UpdateCameraPosition(speed);
+
+            m_MouseLook.UpdateCursorLock();// Fare kontrolünü güncelle
+        }
+
+
+        private void PlayJumpSound()
+        {
+            m_AudioSource.clip = m_JumpSound;// m_AudioSource.clip'e zıplama sesini atar
+            m_AudioSource.Play();
+        }
+
+
+        private void ProgressStepCycle(float speed)
+        {
+            if (m_CharacterController.velocity.sqrMagnitude > 0 && (m_Input.x != 0 || m_Input.y != 0))// Karakter hala hareket halindeyse ve kullanıcı girişi varsa
+            {
+                m_StepCycle += (m_CharacterController.velocity.magnitude + (speed * (m_IsWalking ? 1f : m_RunstepLenghten))) *
+                             Time.fixedDeltaTime; // Adım döngüsünü günceller
+            }
+
+            if (!(m_StepCycle > m_NextStep))  // Eğer adım döngüsü bir sonraki adım için gerekli süreyi geçmediyse fonksiyonu sonlandır
+            {
+                return;
+            }
+
+            m_NextStep = m_StepCycle + m_StepInterval;// Bir sonraki adım zamanını belirle
+
+            PlayFootStepAudio();
+        }
+
+
+        private void PlayFootStepAudio()
+        {
+            if (!m_CharacterController.isGrounded)
+            {
+                return;
+            }
+           
+            int n = Random.Range(1, m_FootstepSounds.Length);// Rastgele bir adım sesini seç
+            m_AudioSource.clip = m_FootstepSounds[n];// AudioSource'in clip'ine seçilen adım sesini atar
+            m_AudioSource.PlayOneShot(m_AudioSource.clip);// Seçilen adım sesini çalar
+
+            m_FootstepSounds[n] = m_FootstepSounds[0]; // Adım sesleri dizisindeki sesleri yer değiştirir
+            m_FootstepSounds[0] = m_AudioSource.clip;
+        }
+
+
+        private void UpdateCameraPosition(float speed)
+        {
+            Vector3 newCameraPosition;
+            if (!m_UseHeadBob) // Yerden bağımsız olarak head bob'u kullanma ayarı kapalı ise fonksiyonu sonlandır
+            {
+                return;
+            }
+            if (m_CharacterController.velocity.magnitude > 0 && m_CharacterController.isGrounded)
+            {
+                m_Camera.transform.localPosition =
+                    m_HeadBob.DoHeadBob(m_CharacterController.velocity.magnitude +
+                                      (speed * (m_IsWalking ? 1f : m_RunstepLenghten)));// Head bob'u uygula ve yeni kamera pozisyonunu al
+                newCameraPosition = m_Camera.transform.localPosition;
+                newCameraPosition.y = m_Camera.transform.localPosition.y - m_JumpBob.Offset();// Zıplama durumu için head bob'u uygula
+            }
+            else
+            {
+                newCameraPosition = m_Camera.transform.localPosition;
+                newCameraPosition.y = m_OriginalCameraPosition.y - m_JumpBob.Offset();      // Hareket yoksa veya yerde değilse, kamera pozisyonunu başlangıç konumuna ayarla
+            }
+            m_Camera.transform.localPosition = newCameraPosition; // Yeni kamera pozisyonunu uygula
+        }
+
+
+        private void GetInput(out float speed)
+        {
+            // CrossPlatformInputManager, Unity'nin CrossPlatformInput paketinde bulunan bir sınıftır ve mobil girişleri yönetir.
+            float horizontal = CrossPlatformInputManager.GetAxis("Horizontal");
+            float vertical = CrossPlatformInputManager.GetAxis("Vertical");
+
+            bool waswalking = m_IsWalking; // Karakterin yürüme durumunu saklar
+
+#if !MOBILE_INPUT
+
+            m_IsWalking = !Input.GetKey(KeyCode.LeftShift);// Sol Shift tuşuna basılı değilse yürüme durumunu aktifleştir
+#endif
+            
+            speed = m_IsWalking ? m_WalkSpeed : m_RunSpeed; // Karakterin hızını belirler
+            m_Input = new Vector2(horizontal, vertical); // Giriş vektörünü oluşturur
+
+
+            if (m_Input.sqrMagnitude > 1) // Eğer giriş vektörünün uzunluğu 1'den büyükse, vektörü normalize et
+            {
+                m_Input.Normalize();
+            }
+
+            
+            if (m_IsWalking != waswalking && m_UseFovKick && m_CharacterController.velocity.sqrMagnitude > 0)
+            {
+                StopAllCoroutines();// Tüm coroutine'ları durdur ve FOVKick coroutine'unu başlat
+                StartCoroutine(!m_IsWalking ? m_FovKick.FOVKickUp() : m_FovKick.FOVKickDown());
+            }
+        }
+
+
+        private void RotateView()
+        {
+            m_MouseLook.LookRotation(transform, m_Camera.transform);// m_MouseLook, bir fare kontrol sınıfının örneğidir ve karakterin bakış yönünü kontrol eder.
+        }
+
+
+        private void OnControllerColliderHit(ControllerColliderHit hit)
+        {
+            Rigidbody body = hit.collider.attachedRigidbody;// Çarpıştığımız nesnenin Rigidbody bileşenini al
+
+            if (m_CollisionFlags == CollisionFlags.Below)// Eğer karakter zemine temas ettiyse sonlandır
+            {
+                return;
+            }
+
+            if (body == null || body.isKinematic)// Eğer çarptığımız nesnenin Rigidbody'i null veya kinematikse, işlem yapma
+            {
+                return;
+            }
+            body.AddForceAtPosition(m_CharacterController.velocity * 0.1f, hit.point, ForceMode.Impulse); // Çarptığımız noktaya karakterin hızının bir kısmını ekleyerek bir darbe uygula
+        }
+        void OnTriggerEnter(Collider other)
+        {
+            other.gameObject.SetActive(false);
+            puan++; // Puanı arttır
+            puanText.text = "Puan:" + puan;//Puan yazdır
+
+            if (puan == objeSayisi)
+            {
+                oyunBittiText.gameObject.SetActive(true);// Eğer elde edilen puan objeSayisi'ne eşitse oyunu bitir
+            }
+
+        }
+    }
+}
+
